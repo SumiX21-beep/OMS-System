@@ -1,0 +1,52 @@
+{
+  "name": "oms-omni",
+  "version": "0.1.0",
+  "description": "Omnichannel Inventory & Distributed Order Management System (OMS/DOM)",
+  "license": "UNLICENSED",
+  "scripts": {
+    "build": "nest build",
+    "start:api": "node dist/main.js",
+    "start:worker": "node dist/main.worker.js",
+    "start:scheduler": "node dist/main.scheduler.js",
+    "dev:all": "bash scripts/dev-all.sh",
+    "stop": "pkill -f 'node dist/main' || true",
+    "ports": "ss -ltnp 2>/dev/null | grep -E ':(3000|5173)' || echo 'nothing on :3000/:5173'",
+    "dev:api": "nest start --watch --entryFile main",
+    "dev:worker": "nest start --watch --entryFile main.worker",
+    "dev:scheduler": "nest start --watch --entryFile main.scheduler",
+    "prisma:generate": "prisma generate",
+    "prisma:migrate": "prisma migrate dev",
+    "prisma:deploy": "prisma migrate deploy",
+    "db:seed": "ts-node prisma/seed.ts",
+    "test": "jest",
+    "typecheck": "tsc --noEmit -p tsconfig.json"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.105.0",
+    "@nestjs/bullmq": "^11.0.2",
+    "@nestjs/common": "^11.0.1",
+    "@nestjs/config": "^4.0.2",
+    "@nestjs/core": "^11.0.1",
+    "@nestjs/platform-express": "^11.0.1",
+    "@nestjs/swagger": "^11.4.4",
+    "@prisma/client": "^6.7.0",
+    "bullmq": "^5.34.0",
+    "class-transformer": "^0.5.1",
+    "class-validator": "^0.14.1",
+    "ioredis": "^5.4.2",
+    "reflect-metadata": "^0.2.2",
+    "rxjs": "^7.8.1"
+  },
+  "devDependencies": {
+    "@nestjs/cli": "^11.0.0",
+    "@nestjs/schematics": "^11.0.0",
+    "@types/express": "^5.0.0",
+    "@types/jest": "^30.0.0",
+    "@types/node": "^22.10.7",
+    "jest": "^30.4.2",
+    "prisma": "^6.7.0",
+    "ts-jest": "^29.4.11",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.7.3"
+  }
+}

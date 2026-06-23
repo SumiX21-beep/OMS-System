@@ -1,0 +1,97 @@
+version: "3.9"
+
+# Full-stack OMS-omni: Postgres + Redis + backend (api/worker/scheduler) +
+# frontend. Bring it all up with: docker compose up --build
+#
+# For local infra only (run the apps from your shell), use
+# backend/docker-compose.yml instead.
+
+x-backend-env: &backend-env
+  DATABASE_URL: postgresql://postgres:postgres@postgres:5432/oms_omni
+  REDIS_HOST: redis
+  REDIS_PORT: "6379"
+  AUTH_REQUIRED: "false"
+  SECRET_ENCRYPTION_KEY: ${SECRET_ENCRYPTION_KEY:-}
+
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: oms_omni
+    ports:
+      - "5432:5432"
+    volumes:
+      - oms_pg:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d oms_omni"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # One-shot: apply migrations (and seed) before the apps start.
+  migrate:
+    build: ./backend
+    command: sh -c "npx prisma migrate deploy && npx ts-node prisma/seed.ts || true"
+    environment: *backend-env
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  api:
+    build: ./backend
+    command: node dist/main.js
+    environment: *backend-env
+    ports:
+      - "3000:3000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+
+  worker:
+    build: ./backend
+    command: node dist/main.worker.js
+    environment: *backend-env
+    depends_on:
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+
+  scheduler:
+    build: ./backend
+    command: node dist/main.scheduler.js
+    environment: *backend-env
+    depends_on:
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        VITE_API_URL: ${VITE_API_URL:-http://localhost:3000}
+    ports:
+      - "5173:80"
+    depends_on:
+      - api
+
+volumes:
+  oms_pg:

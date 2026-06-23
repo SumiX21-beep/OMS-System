@@ -1,0 +1,632 @@
+// OMS/DOM canonical data model.
+// Inventory is event-sourced: InventoryLedger is the append-only source of truth,
+// InventorySnapshot is the derived, concurrency-controlled balance used for ATP.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Tenancy & catalog
+// ─────────────────────────────────────────────────────────────────────────────
+
+model Tenant {
+  id        String   @id @default(cuid())
+  name      String
+  slug      String   @unique
+  createdAt DateTime @default(now()) @db.Timestamptz(3)
+  updatedAt DateTime @updatedAt @db.Timestamptz(3)
+
+  skus              Sku[]
+  locations         Location[]
+  inventoryLedger   InventoryLedger[]
+  inventorySnapshot InventorySnapshot[]
+  orders            Order[]
+  reservations      Reservation[]
+  allocations       Allocation[]
+  shipments         Shipment[]
+  sourcingRules     SourcingRule[]
+  idempotencyKeys   IdempotencyKey[]
+  returns           Return[]
+  salesChannels     SalesChannel[]
+  outboxEvents      OutboxEvent[]
+  apiKeys           ApiKey[]
+  inbounds          Inbound[]
+}
+
+model Sku {
+  id        String   @id @default(cuid())
+  tenantId  String
+  tenant    Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  code      String // merchant-facing SKU code
+  name      String
+  active    Boolean  @default(true)
+  // Default network-wide safety stock for this SKU (can be overridden per snapshot).
+  createdAt DateTime @default(now()) @db.Timestamptz(3)
+  updatedAt DateTime @updatedAt @db.Timestamptz(3)
+
+  snapshots    InventorySnapshot[]
+  ledger       InventoryLedger[]
+  orderLines   OrderLine[]
+  reservations Reservation[]
+  allocations  Allocation[]
+  inbounds     Inbound[]
+
+  @@unique([tenantId, code])
+  @@index([tenantId])
+}
+
+enum LocationType {
+  WAREHOUSE
+  STORE
+  THIRD_PARTY_LOGISTICS
+  DROP_SHIP_VENDOR
+}
+
+model Location {
+  id       String       @id @default(cuid())
+  tenantId String
+  tenant   Tenant       @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  code     String
+  name     String
+  type     LocationType @default(WAREHOUSE)
+  active   Boolean      @default(true)
+
+  // Geo for proximity-based sourcing.
+  latitude  Float?
+  longitude Float?
+
+  // Sourcing controls.
+  fulfillmentPriority Int     @default(100) // lower = preferred
+  shipFromEnabled     Boolean @default(true)
+  pickupEnabled       Boolean @default(false)
+  dailyOrderCapacity  Int? // null = unlimited
+
+  createdAt DateTime @default(now()) @db.Timestamptz(3)
+  updatedAt DateTime @updatedAt @db.Timestamptz(3)
+
+  snapshots    InventorySnapshot[]
+  ledger       InventoryLedger[]
+  reservations Reservation[]
+  allocations  Allocation[]
+  shipments    Shipment[]
+  inbounds     Inbound[]
+
+  @@unique([tenantId, code])
+  @@index([tenantId])
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Inventory (event-sourced ledger + derived snapshot)
+// ─────────────────────────────────────────────────────────────────────────────
+
+enum InventoryEventType {
+  RECEIPT // goods received into on-hand
+  ADJUSTMENT // manual/cycle-count correction (signed)
+  RESERVE // soft hold created
+  RELEASE_RESERVE // soft hold released (expiry/cancel)
+  ALLOCATE // hard commit to an order
+  DEALLOCATE // hard commit released
+  CONVERT_RESERVE_TO_ALLOC // reservation hardened into allocation
+  SHIP // allocated stock shipped out
+  RETURN // returned stock back to on-hand
+  DAMAGE // moved on-hand into damaged/quarantine
+  INBOUND_CREATE // expected inbound (in-transit) created
+  INBOUND_ARRIVE // in-transit converted to on-hand
+  TRANSFER_OUT // on-hand leaving a location for another
+  TRANSFER_IN // on-hand arriving at a location from another
+}
+
+// Append-only audit trail. Each row captures signed deltas to the snapshot buckets,
+// so the snapshot can always be re-derived by summing the ledger.
+model InventoryLedger {
+  id         String             @id @default(cuid())
+  tenantId   String
+  tenant     Tenant             @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  skuId      String
+  sku        Sku                @relation(fields: [skuId], references: [id])
+  locationId String
+  location   Location           @relation(fields: [locationId], references: [id])
+  eventType  InventoryEventType
+
+  onHandDelta    Int @default(0)
+  reservedDelta  Int @default(0)
+  allocatedDelta Int @default(0)
+  inTransitDelta Int @default(0)
+  damagedDelta   Int @default(0)
+
+  // What caused this movement (order, reservation, shipment, manual...).
+  referenceType String?
+  referenceId   String?
+  reason        String?
+
+  createdAt DateTime @default(now()) @db.Timestamptz(3)
+
+  @@index([tenantId, skuId, locationId])
+  @@index([referenceType, referenceId])
+  @@index([createdAt])
+}
+
+// Derived per-(sku, location) balance. `version` powers optimistic concurrency;
+// writes also take a row lock (SELECT ... FOR UPDATE) for strong consistency.
+model InventorySnapshot {
+  id         String   @id @default(cuid())
+  tenantId   String
+  tenant     Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  skuId      String
+  sku        Sku      @relation(fields: [skuId], references: [id])
+  locationId String
+  location   Location @relation(fields: [locationId], references: [id])
+
+  onHand      Int @default(0)
+  reserved    Int @default(0)
+  allocated   Int @default(0)
+  inTransit   Int @default(0)
+  damaged     Int @default(0)
+  safetyStock Int @default(0)
+
+  version   Int      @default(0)
+  updatedAt DateTime @updatedAt @db.Timestamptz(3)
+
+  @@unique([tenantId, skuId, locationId])
+  @@index([tenantId, skuId])
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Orders & lifecycle
+// ─────────────────────────────────────────────────────────────────────────────
+
+enum OrderChannel {
+  WEB
+  POS
+  MARKETPLACE
+  PHONE
+  B2B
+}
+
+enum OrderStatus {
+  CREATED
+  VALIDATED
+  ALLOCATED
+  RELEASED
+  PICKED
+  SHIPPED
+  DELIVERED
+  CANCELLED
+  RETURNED
+}
+
+enum FulfillmentType {
+  SHIP_FROM_DC
+  SHIP_FROM_STORE
+  BOPIS // buy online, pick up in store
+  CURBSIDE
+  DROP_SHIP
+}
+
+enum PaymentStatus {
+  PENDING
+  AUTHORIZED
+  CAPTURED
+  DECLINED
+}
+
+enum FraudStatus {
+  PENDING
+  PASS
+  REVIEW
+  FAIL
+}
+
+model Order {
+  id          String       @id @default(cuid())
+  tenantId    String
+  tenant      Tenant       @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  channel     OrderChannel
+  externalRef String? // channel order id (Shopify, marketplace, POS...)
+  status      OrderStatus  @default(CREATED)
+
+  // Ship-to for sourcing/proximity.
+  shipToLatitude  Float?
+  shipToLongitude Float?
+  shipToRegion    String?
+
+  allowSplit     Boolean @default(true)
+  allowBackorder Boolean @default(false)
+
+  customerRef String?
+  currency    String  @default("USD")
+
+  // Set by the validation pipeline (payment/fraud/tax/promo hooks).
+  paymentStatus PaymentStatus @default(PENDING)
+  fraudStatus   FraudStatus   @default(PENDING)
+  taxTotal      Int           @default(0) // minor units
+  discountTotal Int           @default(0) // minor units
+
+  createdAt DateTime @default(now()) @db.Timestamptz(3)
+  updatedAt DateTime @updatedAt @db.Timestamptz(3)
+
+  lines        OrderLine[]
+  reservations Reservation[]
+  allocations  Allocation[]
+  shipments    Shipment[]
+  events       OrderEvent[]
+  returns      Return[]
+
+  @@unique([tenantId, channel, externalRef])
+  @@index([tenantId, status])
+}
+
+model OrderLine {
+  id        String @id @default(cuid())
+  orderId   String
+  order     Order  @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  skuId     String
+  sku       Sku    @relation(fields: [skuId], references: [id])
+  quantity  Int
+  unitPrice Int    @default(0) // minor units (cents)
+
+  allocations  Allocation[]
+  reservations Reservation[]
+  returnLines  ReturnLine[]
+
+  @@index([orderId])
+}
+
+// Immutable audit of every state transition.
+model OrderEvent {
+  id         String       @id @default(cuid())
+  orderId    String
+  order      Order        @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  fromStatus OrderStatus?
+  toStatus   OrderStatus
+  note       String?
+  createdAt  DateTime     @default(now()) @db.Timestamptz(3)
+
+  @@index([orderId])
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Reservations (soft holds, TTL) & Allocations (hard commits)
+// ─────────────────────────────────────────────────────────────────────────────
+
+enum ReservationStatus {
+  ACTIVE
+  CONSUMED // converted into an allocation
+  RELEASED // manually/cancel released
+  EXPIRED // TTL swept
+}
+
+model Reservation {
+  id          String     @id @default(cuid())
+  tenantId    String
+  tenant      Tenant     @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  skuId       String
+  sku         Sku        @relation(fields: [skuId], references: [id])
+  locationId  String
+  location    Location   @relation(fields: [locationId], references: [id])
+  orderId     String?
+  order       Order?     @relation(fields: [orderId], references: [id])
+  orderLineId String?
+  orderLine   OrderLine? @relation(fields: [orderLineId], references: [id])
+
+  quantity  Int
+  status    ReservationStatus @default(ACTIVE)
+  expiresAt DateTime          @db.Timestamptz(3)
+
+  createdAt DateTime @default(now()) @db.Timestamptz(3)
+  updatedAt DateTime @updatedAt @db.Timestamptz(3)
+
+  @@index([tenantId, status, expiresAt])
+  @@index([orderId])
+}
+
+enum AllocationStatus {
+  ALLOCATED
+  PICKED
+  SHIPPED
+  CANCELLED
+}
+
+model Allocation {
+  id          String    @id @default(cuid())
+  tenantId    String
+  tenant      Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  orderId     String
+  order       Order     @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  orderLineId String
+  orderLine   OrderLine @relation(fields: [orderLineId], references: [id])
+  skuId       String
+  sku         Sku       @relation(fields: [skuId], references: [id])
+  locationId  String
+  location    Location  @relation(fields: [locationId], references: [id])
+
+  quantity Int
+  status   AllocationStatus @default(ALLOCATED)
+
+  shipmentId String?
+  shipment   Shipment? @relation(fields: [shipmentId], references: [id])
+
+  createdAt DateTime @default(now()) @db.Timestamptz(3)
+  updatedAt DateTime @updatedAt @db.Timestamptz(3)
+
+  @@index([tenantId, orderId])
+  @@index([locationId, status])
+}
+
+enum ShipmentStatus {
+  PENDING
+  PICKED
+  READY_FOR_PICKUP // BOPIS/curbside: staged at store, awaiting customer
+  SHIPPED
+  PICKED_UP // BOPIS/curbside: collected by customer
+  DELIVERED
+  CANCELLED
+}
+
+// A shipment groups allocations fulfilled together from one location
+// (enables split-shipment: one order -> many shipments across nodes).
+model Shipment {
+  id                  String          @id @default(cuid())
+  tenantId            String
+  tenant              Tenant          @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  orderId             String
+  order               Order           @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  locationId          String
+  location            Location        @relation(fields: [locationId], references: [id])
+  fulfillmentType     FulfillmentType @default(SHIP_FROM_DC)
+  status              ShipmentStatus  @default(PENDING)
+  trackingNumber      String?
+  carrier             String?
+  // WMS/3PL handoff bookkeeping.
+  fulfillmentProvider String?
+  externalJobId       String?
+
+  createdAt DateTime @default(now()) @db.Timestamptz(3)
+  updatedAt DateTime @updatedAt @db.Timestamptz(3)
+
+  allocations Allocation[]
+
+  @@index([tenantId, orderId])
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Sourcing rules (DOM) & idempotency
+// ─────────────────────────────────────────────────────────────────────────────
+
+enum SourcingStrategy {
+  NEAREST // minimize distance to ship-to
+  PRIORITY // honor Location.fulfillmentPriority
+  FEWEST_SPLITS // prefer a single node that can fill the whole order
+  BALANCED // priority + capacity-aware (default)
+}
+
+model SourcingRule {
+  id         String           @id @default(cuid())
+  tenantId   String
+  tenant     Tenant           @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  name       String
+  // Optional scoping: apply only to this channel/region (null = any).
+  channel    OrderChannel?
+  region     String?
+  strategy   SourcingStrategy @default(BALANCED)
+  // Allowed fulfillment types and node types, JSON arrays of enum names.
+  allowSplit Boolean          @default(true)
+  priority   Int              @default(100) // lower = evaluated first
+  active     Boolean          @default(true)
+
+  createdAt DateTime @default(now()) @db.Timestamptz(3)
+  updatedAt DateTime @updatedAt @db.Timestamptz(3)
+
+  @@index([tenantId, active, priority])
+}
+
+// Stores the result of a previously-seen idempotency key so retried mutations
+// return the original response instead of re-executing.
+model IdempotencyKey {
+  id           String   @id @default(cuid())
+  tenantId     String
+  tenant       Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  key          String
+  scope        String // e.g. "orders.create"
+  requestHash  String
+  responseBody Json
+  statusCode   Int      @default(201)
+  createdAt    DateTime @default(now()) @db.Timestamptz(3)
+
+  @@unique([tenantId, scope, key])
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Phase 4 — Returns / RMA (reverse logistics)
+// ─────────────────────────────────────────────────────────────────────────────
+
+enum ReturnStatus {
+  REQUESTED
+  RECEIVED // goods physically back
+  COMPLETED // restocked / refunded
+  CANCELLED
+}
+
+model Return {
+  id       String       @id @default(cuid())
+  tenantId String
+  tenant   Tenant       @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  orderId  String
+  order    Order        @relation(fields: [orderId], references: [id])
+  status   ReturnStatus @default(REQUESTED)
+  reason   String?
+  rma      String // human-facing RMA code
+
+  createdAt DateTime @default(now()) @db.Timestamptz(3)
+  updatedAt DateTime @updatedAt @db.Timestamptz(3)
+
+  lines ReturnLine[]
+
+  @@unique([tenantId, rma])
+  @@index([tenantId, status])
+  @@index([orderId])
+}
+
+model ReturnLine {
+  id          String    @id @default(cuid())
+  returnId    String
+  return      Return    @relation(fields: [returnId], references: [id], onDelete: Cascade)
+  orderLineId String
+  orderLine   OrderLine @relation(fields: [orderLineId], references: [id])
+  skuId       String
+  quantity    Int
+  // Whether the unit goes back to sellable stock and at which node.
+  restock     Boolean   @default(true)
+  locationId  String?
+
+  @@index([returnId])
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Phase 5 — Channel sync (OMS as source of truth) & transactional outbox
+// ─────────────────────────────────────────────────────────────────────────────
+
+enum ChannelType {
+  SHOPIFY
+  MARKETPLACE
+  POS
+  OTHER
+}
+
+model SalesChannel {
+  id          String      @id @default(cuid())
+  tenantId    String
+  tenant      Tenant      @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  type        ChannelType
+  name        String
+  active      Boolean     @default(true)
+  // External identity (e.g. Shopify shop domain "demo.myshopify.com").
+  externalRef String?
+  // Connector config: { shopDomain, accessToken, apiVersion, inventoryLocationGid,
+  // webhookSecret, scopes }. Secrets MUST be encrypted at rest in production.
+  config      Json?
+
+  createdAt DateTime @default(now()) @db.Timestamptz(3)
+  updatedAt DateTime @updatedAt @db.Timestamptz(3)
+
+  skuMappings ChannelSkuMapping[]
+
+  @@unique([tenantId, name])
+  @@index([tenantId, active])
+  @@index([externalRef])
+}
+
+// Caches the resolved mapping between an OMS SKU and the channel's inventory
+// identifier (Shopify InventoryItem gid), so pushes don't re-query every time.
+model ChannelSkuMapping {
+  id              String       @id @default(cuid())
+  channelId       String
+  channel         SalesChannel @relation(fields: [channelId], references: [id], onDelete: Cascade)
+  skuId           String
+  // e.g. "gid://shopify/InventoryItem/30322695"
+  inventoryItemId String
+  variantId       String?
+  createdAt       DateTime     @default(now()) @db.Timestamptz(3)
+  updatedAt       DateTime     @updatedAt @db.Timestamptz(3)
+
+  @@unique([channelId, skuId])
+  @@index([skuId])
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Auth — API keys & RBAC
+// ─────────────────────────────────────────────────────────────────────────────
+
+enum ApiRole {
+  ADMIN // everything incl. admin/reconciliation/channels
+  OPERATOR // inventory + order/fulfilment mutations
+  READ_ONLY // GET only
+}
+
+model ApiKey {
+  id         String    @id @default(cuid())
+  tenantId   String
+  tenant     Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  name       String
+  // sha256(raw key). The raw key is shown once at creation and never stored.
+  keyHash    String    @unique
+  // First 8 chars of the raw key, for display/identification.
+  prefix     String
+  role       ApiRole   @default(OPERATOR)
+  active     Boolean   @default(true)
+  lastUsedAt DateTime? @db.Timestamptz(3)
+  createdAt  DateTime  @default(now()) @db.Timestamptz(3)
+
+  @@index([tenantId, active])
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Inbound (in-transit) supply with ETA — drives the ATP inbound horizon
+// ─────────────────────────────────────────────────────────────────────────────
+
+enum InboundStatus {
+  EXPECTED
+  RECEIVED
+  CANCELLED
+}
+
+model Inbound {
+  id          String        @id @default(cuid())
+  tenantId    String
+  tenant      Tenant        @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  skuId       String
+  sku         Sku           @relation(fields: [skuId], references: [id])
+  locationId  String
+  location    Location      @relation(fields: [locationId], references: [id])
+  quantity    Int
+  receivedQty Int           @default(0)
+  expectedAt  DateTime      @db.Timestamptz(3) // ETA — only inbound within the ATP horizon counts toward ATP
+  status      InboundStatus @default(EXPECTED)
+  reference   String?
+
+  createdAt DateTime @default(now()) @db.Timestamptz(3)
+  updatedAt DateTime @updatedAt @db.Timestamptz(3)
+
+  @@index([tenantId, skuId, status, expectedAt])
+  @@index([tenantId, locationId, skuId, status])
+}
+
+enum OutboxStatus {
+  PENDING
+  PUBLISHED
+  FAILED
+}
+
+enum OutboxType {
+  INVENTORY_ATP_CHANGED
+  ORDER_STATUS_CHANGED
+}
+
+// Transactional outbox: every meaningful change is recorded here and drained
+// asynchronously to sales channels. `seq` is a monotonic cursor StockShield (or
+// any consumer) can page through with "changes since".
+model OutboxEvent {
+  id        String       @id @default(cuid())
+  seq       BigInt       @default(autoincrement())
+  tenantId  String
+  tenant    Tenant       @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  type      OutboxType
+  // Subject of the change (e.g. skuId or orderId).
+  subjectId String
+  payload   Json
+  status    OutboxStatus @default(PENDING)
+
+  createdAt   DateTime  @default(now()) @db.Timestamptz(3)
+  publishedAt DateTime? @db.Timestamptz(3)
+  attempts    Int       @default(0)
+  lastError   String?
+
+  @@index([status, seq])
+  @@index([tenantId, type, seq])
+}
