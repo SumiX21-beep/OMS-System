@@ -8,6 +8,14 @@ sales channels.
 Stack: **NestJS + Prisma/Postgres + Redis/BullMQ**, split into three processes
 (API / Worker / Scheduler).
 
+## Repository layout
+
+| Path | What |
+|------|------|
+| [`backend/`](backend/) | NestJS API, worker & scheduler (Prisma, Redis/BullMQ, Shopify, AI, SSE) |
+| [`frontend/`](frontend/) | React + Vite + Tailwind operations console (dark UI) |
+| [`docker-compose.yml`](docker-compose.yml) | Full stack: Postgres + Redis + backend + frontend |
+
 ## What's built (Phases 0–3)
 
 | Phase | Capability |
