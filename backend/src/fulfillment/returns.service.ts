@@ -1,10 +1,17 @@
 import { BadRequestException, Injectable, Logger } from '@nestjs/common';
 import { randomUUID } from 'crypto';
-import { OrderStatus, Prisma, Return, ReturnStatus } from '@prisma/client';
+import {
+  OrderStatus,
+  PaymentStatus,
+  Prisma,
+  Return,
+  ReturnStatus,
+} from '@prisma/client';
 import { PrismaService } from '../common/prisma/prisma.service';
 import { makePage, toSkipTake } from '../common/pagination';
 import { InventoryService } from '../inventory/inventory.service';
 import { OrdersService } from '../orders/orders.service';
+import { PaymentsService } from '../payments/payments.service';
 import { CreateReturnDto, ReturnListQueryDto } from './dto/fulfillment.dto';
 
 /**
@@ -20,6 +27,7 @@ export class ReturnsService {
     private readonly prisma: PrismaService,
     private readonly inventory: InventoryService,
     private readonly orders: OrdersService,
+    private readonly payments: PaymentsService,
   ) {}
 
   /** Paginated RMA list for the console. */
@@ -150,12 +158,59 @@ export class ReturnsService {
 
     // If the whole order has now been returned, reflect it on the order.
     await this.maybeMarkOrderReturned(tenantId, rma.orderId);
+
+    // Refund the returned value to the customer's original charge.
+    await this.refundReturn(tenantId, rma);
     this.log.log(`Received return ${rma.rma}`);
 
     return this.prisma.return.findUniqueOrThrow({
       where: { id: rma.id },
       include: { lines: true },
     });
+  }
+
+  /**
+   * Refund the value of the returned lines against the order's captured charge.
+   * Partial returns issue a partial refund and leave the order CAPTURED; once the
+   * whole order is back (status RETURNED) the payment is marked REFUNDED.
+   */
+  private async refundReturn(
+    tenantId: string,
+    rma: Prisma.ReturnGetPayload<{ include: { lines: true } }>,
+  ): Promise<void> {
+    const order = await this.prisma.order.findFirst({
+      where: { id: rma.orderId, tenantId },
+      include: { lines: true },
+    });
+    if (
+      !order ||
+      !order.paymentReference ||
+      order.paymentStatus !== PaymentStatus.CAPTURED
+    ) {
+      return;
+    }
+
+    const priceByLine = new Map(order.lines.map((l) => [l.id, l.unitPrice]));
+    const refundMinor = rma.lines.reduce(
+      (sum, l) => sum + (priceByLine.get(l.orderLineId) ?? 0) * l.quantity,
+      0,
+    );
+    if (refundMinor <= 0) return;
+
+    const res = await this.payments.refund(order, refundMinor);
+    if (res.status !== 'REFUNDED') {
+      this.log.error(`Refund FAILED for return ${rma.rma} (order ${order.id})`);
+      return;
+    }
+    this.log.log(`Refunded ${refundMinor} ${order.currency} for return ${rma.rma}`);
+
+    // Whole order returned → settle the payment as fully refunded.
+    if (order.status === OrderStatus.RETURNED) {
+      await this.prisma.order.update({
+        where: { id: order.id },
+        data: { paymentStatus: PaymentStatus.REFUNDED },
+      });
+    }
   }
 
   private async defaultRestockLocation(

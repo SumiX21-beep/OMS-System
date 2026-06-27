@@ -1,4 +1,4 @@
-import type { OrderStatus, ShipmentStatus } from './types';
+import type { OrderStatus, PaymentStatus, ShipmentStatus } from './types';
 
 /** Minor units (cents) → currency string. */
 export function money(minor: number, currency = 'USD'): string {
@@ -43,10 +43,23 @@ const SHIPMENT_TONE: Record<ShipmentStatus, string> = {
   CANCELLED: 'bg-red-500/15 text-red-300',
 };
 
+const PAYMENT_TONE: Record<PaymentStatus, string> = {
+  PENDING: 'bg-slate-500/15 text-slate-300',
+  AUTHORIZED: 'bg-blue-500/15 text-blue-300',
+  CAPTURED: 'bg-green-500/15 text-green-300',
+  DECLINED: 'bg-red-500/15 text-red-300',
+  REFUNDED: 'bg-orange-500/15 text-orange-300',
+  VOIDED: 'bg-slate-500/15 text-slate-400',
+};
+
 export function orderTone(s: OrderStatus): string {
   return ORDER_TONE[s] ?? 'bg-slate-500/15 text-slate-300';
 }
 
 export function shipmentTone(s: ShipmentStatus): string {
   return SHIPMENT_TONE[s] ?? 'bg-slate-500/15 text-slate-300';
+}
+
+export function paymentTone(s: PaymentStatus): string {
+  return PAYMENT_TONE[s] ?? 'bg-slate-500/15 text-slate-300';
 }
