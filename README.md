@@ -51,19 +51,22 @@ Stack: **NestJS + Prisma/Postgres + Redis/BullMQ**, split into three processes
   (`POST /auth/login` with email/password → bcrypt verify → HS256 token; users in
   the `User` table). The global guard accepts either on the same `Bearer` header.
   Dev fallback (`AUTH_REQUIRED=false`) trusts `x-tenant-id` as ADMIN.
-- **Pluggable providers** — payment gateway (`PaymentProvider`: mock | Stripe
-  drop-in) drives order validation's auth/capture/refund; WMS/3PL connector
-  (`WmsProvider`: mock | ShipBob drop-in) drives shipment dispatch. Both selected
-  by env, both dry-run safely without vendor credentials.
+- **Pluggable providers** — payment gateway (`PaymentProvider`: mock | **live
+  Stripe**) drives the money lifecycle: authorize on validate → capture when the
+  order ships → refund on return / void on cancel. The Stripe adapter creates real
+  manual-capture PaymentIntents (`STRIPE_SECRET_KEY`), persisting the intent id on
+  the order (`paymentReference`) for later capture/refund; without a key it dry-runs.
+  WMS/3PL connector (`WmsProvider`: mock | ShipBob drop-in) drives shipment dispatch.
+  All selected by env, all dry-run safely without vendor credentials.
 - **Real-time across processes** — domain events fan out over a Redis pub/sub
   bridge, so a write in the worker (e.g. reservation TTL expiry) reaches SSE
   clients connected to the API.
 - **Timestamptz** — all DateTime columns are now `@db.Timestamptz(3)`.
-- **Tests** — `npm test` runs 24 Jest unit tests (HMAC, state machine, retry,
-  validation, geo) across 5 suites.
+- **Tests** — `npm test` runs 45 Jest unit tests (HMAC, state machine, retry,
+  validation, payments, geo) across 9 suites.
 
-Not yet built: live vendor SDK calls behind the payment/WMS provider seams (the
-mock + dry-run adapters ship today), and a hosted IdP option (the self-hosted JWT
+Not yet built: live **ShipBob** WMS SDK calls (the mock + dry-run adapter ships
+today; Stripe payments are now live), and a hosted IdP option (the self-hosted JWT
 path ships today).
 
 ### Shopify integration

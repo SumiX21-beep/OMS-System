@@ -3,6 +3,7 @@ import { randomUUID } from 'crypto';
 import {
   AllocationStatus,
   OrderStatus,
+  PaymentStatus,
   Prisma,
   Shipment,
   ShipmentStatus,
@@ -11,6 +12,7 @@ import { PrismaService } from '../common/prisma/prisma.service';
 import { makePage, toSkipTake } from '../common/pagination';
 import { InventoryService } from '../inventory/inventory.service';
 import { OrdersService } from '../orders/orders.service';
+import { PaymentsService } from '../payments/payments.service';
 import { WmsService } from './wms.service';
 
 // Linear post-allocation chain the order walks as its shipments progress.
@@ -48,6 +50,7 @@ export class FulfillmentService {
     private readonly inventory: InventoryService,
     private readonly orders: OrdersService,
     private readonly wms: WmsService,
+    private readonly payments: PaymentsService,
   ) {}
 
   /** Hand a picked shipment off to its WMS/3PL; records provider + job id. */
@@ -314,6 +317,37 @@ export class FulfillmentService {
         ORDER_CHAIN[i],
         'fulfilment rollup',
       );
+    }
+
+    // Goods have left our hands → capture the authorized funds (once).
+    if (toIdx >= ORDER_CHAIN.indexOf(OrderStatus.SHIPPED)) {
+      await this.captureOrderPayment(orderId);
+    }
+  }
+
+  /**
+   * Capture the order's authorized charge when it ships. Idempotent: only an
+   * AUTHORIZED order with a gateway reference is captured, so repeated rollups
+   * (split shipments, redundant events) never double-charge.
+   */
+  private async captureOrderPayment(orderId: string): Promise<void> {
+    const order = await this.prisma.order.findUnique({ where: { id: orderId } });
+    if (
+      !order ||
+      !order.paymentReference ||
+      order.paymentStatus !== PaymentStatus.AUTHORIZED
+    ) {
+      return;
+    }
+    const res = await this.payments.capture(order, order.paymentReference);
+    if (res.status === 'CAPTURED') {
+      await this.prisma.order.update({
+        where: { id: orderId },
+        data: { paymentStatus: PaymentStatus.CAPTURED },
+      });
+      this.log.log(`Captured payment for order ${orderId} (${res.reference})`);
+    } else {
+      this.log.error(`Payment capture FAILED for order ${orderId}`);
     }
   }
 

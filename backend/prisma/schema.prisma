@@ -215,6 +215,8 @@ enum PaymentStatus {
   AUTHORIZED
   CAPTURED
   DECLINED
+  REFUNDED
+  VOIDED
 }
 
 enum FraudStatus {
@@ -248,6 +250,9 @@ model Order {
   fraudStatus   FraudStatus   @default(PENDING)
   taxTotal      Int           @default(0) // minor units
   discountTotal Int           @default(0) // minor units
+
+  // Gateway handle (Stripe PaymentIntent id / mock ref) for capture & refund.
+  paymentReference String?
 
   createdAt DateTime @default(now()) @db.Timestamptz(3)
   updatedAt DateTime @updatedAt @db.Timestamptz(3)

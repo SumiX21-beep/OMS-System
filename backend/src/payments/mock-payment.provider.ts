@@ -1,4 +1,5 @@
 import { Injectable, Logger } from '@nestjs/common';
+import { Order } from '@prisma/client';
 import { randomUUID } from 'crypto';
 import {
   OrderForPayment,
@@ -6,6 +7,7 @@ import {
   PaymentCapture,
   PaymentProvider,
   PaymentRefund,
+  PaymentVoid,
   orderAmountMinor,
 } from './payment-provider.interface';
 
@@ -33,7 +35,7 @@ export class MockPaymentProvider implements PaymentProvider {
   }
 
   async capture(
-    _order: OrderForPayment,
+    _order: Order,
     authReference?: string,
   ): Promise<PaymentCapture> {
     return {
@@ -47,5 +49,12 @@ export class MockPaymentProvider implements PaymentProvider {
     _amountMinor: number,
   ): Promise<PaymentRefund> {
     return { status: 'REFUNDED', reference: `mock_ref_${randomUUID().slice(0, 12)}` };
+  }
+
+  async voidPayment(
+    _order: Order,
+    authReference?: string,
+  ): Promise<PaymentVoid> {
+    return { status: 'VOIDED', reference: authReference ?? `mock_void_${randomUUID().slice(0, 12)}` };
   }
 }

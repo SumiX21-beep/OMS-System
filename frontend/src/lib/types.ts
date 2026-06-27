@@ -15,6 +15,14 @@ export type OrderStatus =
 
 export type OrderChannel = 'WEB' | 'POS' | 'MARKETPLACE' | 'PHONE' | 'B2B';
 
+export type PaymentStatus =
+  | 'PENDING'
+  | 'AUTHORIZED'
+  | 'CAPTURED'
+  | 'DECLINED'
+  | 'REFUNDED'
+  | 'VOIDED';
+
 export type ShipmentStatus =
   | 'PENDING'
   | 'PICKED'
@@ -106,7 +114,7 @@ export interface OrderSummary {
   channel: OrderChannel;
   externalRef: string | null;
   status: OrderStatus;
-  paymentStatus: string;
+  paymentStatus: PaymentStatus;
   taxTotal: number;
   createdAt: string;
   lines: OrderLine[];
@@ -116,6 +124,7 @@ export interface OrderSummary {
 export interface OrderDetail extends OrderSummary {
   customerRef: string | null;
   currency: string;
+  paymentReference: string | null;
   reservations: { id: string; skuId: string; locationId: string; quantity: number; status: string }[];
   allocations: { id: string; skuId: string; locationId: string; quantity: number; status: string }[];
   shipments: Shipment[];

@@ -5,6 +5,7 @@ import {
   ErrorBox,
   Loading,
   OrderStatusBadge,
+  PaymentStatusBadge,
   ShipmentStatusBadge,
 } from '@/components/common';
 import { RoleGate } from '@/auth/RoleGate';
@@ -116,7 +117,17 @@ export function OrderDetailPage() {
         </Card>
         <Card className="p-3">
           <div className="text-xs text-slate-400">Payment</div>
-          <div className="font-medium">{o.paymentStatus}</div>
+          <div className="mt-0.5">
+            <PaymentStatusBadge status={o.paymentStatus} />
+          </div>
+          {o.paymentReference && (
+            <div
+              className="mt-1 truncate font-mono text-xs text-slate-500"
+              title={o.paymentReference}
+            >
+              {o.paymentReference}
+            </div>
+          )}
         </Card>
         <Card className="p-3">
           <div className="text-xs text-slate-400">Tax</div>
