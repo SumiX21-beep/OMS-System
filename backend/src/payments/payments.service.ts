@@ -1,4 +1,5 @@
 import { Inject, Injectable, Logger } from '@nestjs/common';
+import { Order } from '@prisma/client';
 import {
   OrderForPayment,
   PAYMENT_PROVIDER,
@@ -6,6 +7,7 @@ import {
   PaymentCapture,
   PaymentProvider,
   PaymentRefund,
+  PaymentVoid,
   orderAmountMinor,
 } from './payment-provider.interface';
 
@@ -31,11 +33,15 @@ export class PaymentsService {
     return this.provider.authorize(order);
   }
 
-  capture(order: OrderForPayment, authReference?: string): Promise<PaymentCapture> {
+  capture(order: Order, authReference?: string): Promise<PaymentCapture> {
     return this.provider.capture(order, authReference);
   }
 
   refund(order: OrderForPayment, amountMinor?: number): Promise<PaymentRefund> {
     return this.provider.refund(order, amountMinor ?? orderAmountMinor(order));
+  }
+
+  voidPayment(order: Order, authReference?: string): Promise<PaymentVoid> {
+    return this.provider.voidPayment(order, authReference);
   }
 }

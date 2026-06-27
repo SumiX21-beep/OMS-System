@@ -21,16 +21,28 @@ export interface PaymentRefund {
   reference?: string;
 }
 
+export interface PaymentVoid {
+  status: 'VOIDED' | 'FAILED';
+  reference?: string;
+}
+
 /**
  * A payment gateway. The OMS depends only on this interface; swapping the
  * built-in mock for Stripe / Adyen / Braintree is a single new class registered
  * under the PAYMENT_PROVIDER token — no caller changes.
+ *
+ * Money moves through the order lifecycle as: authorize (on validate) →
+ * capture (when the order ships) → refund (on return) or voidPayment (when a
+ * still-uncaptured order is cancelled).
  */
 export interface PaymentProvider {
   readonly name: string;
   authorize(order: OrderForPayment): Promise<PaymentAuthorization>;
-  capture(order: OrderForPayment, authReference?: string): Promise<PaymentCapture>;
+  // capture/voidPayment act on an existing gateway handle and need no line detail.
+  capture(order: Order, authReference?: string): Promise<PaymentCapture>;
   refund(order: OrderForPayment, amountMinor: number): Promise<PaymentRefund>;
+  /** Release an authorization that was never captured (e.g. order cancelled). */
+  voidPayment(order: Order, authReference?: string): Promise<PaymentVoid>;
 }
 
 /** DI token for the selected provider (chosen by env PAYMENT_PROVIDER). */

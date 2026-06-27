@@ -1,6 +1,7 @@
 import { Module } from '@nestjs/common';
 import { InventoryModule } from '../inventory/inventory.module';
 import { OrdersModule } from '../orders/orders.module';
+import { PaymentsModule } from '../payments/payments.module';
 import { FulfillmentController } from './fulfillment.controller';
 import { FulfillmentService } from './fulfillment.service';
 import { MockWmsProvider } from './providers/mock-wms.provider';
@@ -10,7 +11,7 @@ import { ReturnsService } from './returns.service';
 import { WmsService } from './wms.service';
 
 @Module({
-  imports: [InventoryModule, OrdersModule],
+  imports: [InventoryModule, OrdersModule, PaymentsModule],
   controllers: [FulfillmentController],
   providers: [
     FulfillmentService,

@@ -3,6 +3,7 @@ import {
   AllocationStatus,
   Order,
   OrderStatus,
+  PaymentStatus,
   Prisma,
   ShipmentStatus,
 } from '@prisma/client';
@@ -10,6 +11,7 @@ import { PrismaService } from '../common/prisma/prisma.service';
 import { makePage, toSkipTake } from '../common/pagination';
 import { EventsService } from '../events/events.service';
 import { InventoryService } from '../inventory/inventory.service';
+import { PaymentsService } from '../payments/payments.service';
 import { CreateOrderDto, OrderListQueryDto } from './dto/order.dto';
 import { assertTransition } from './order-state-machine';
 import { ReservationService } from './reservations.service';
@@ -23,6 +25,7 @@ export class OrdersService {
     private readonly reservations: ReservationService,
     private readonly validation: OrderValidationService,
     private readonly events: EventsService,
+    private readonly payments: PaymentsService,
   ) {}
 
   /** Capture a canonical order from any channel. */
@@ -123,6 +126,7 @@ export class OrdersService {
         fraudStatus: outcome.fraudStatus,
         taxTotal: outcome.taxTotal,
         discountTotal: outcome.discountTotal,
+        paymentReference: outcome.paymentReference ?? null,
       },
     });
 
@@ -212,7 +216,42 @@ export class OrdersService {
       data: { status: ShipmentStatus.CANCELLED },
     });
 
-    return this.transition(tenantId, id, OrderStatus.CANCELLED, note);
+    // Transition first: if CANCELLED is illegal from this state it throws here,
+    // before any money is moved. Then reverse the charge.
+    const cancelled = await this.transition(tenantId, id, OrderStatus.CANCELLED, note);
+    await this.reversePayment(order);
+    return cancelled;
+  }
+
+  /**
+   * Give the customer their money back when an order is cancelled: refund a
+   * captured charge, void an authorization that never captured. No-op when
+   * nothing was charged (or it was already reversed).
+   */
+  private async reversePayment(order: Order): Promise<void> {
+    if (!order.paymentReference) return;
+
+    if (order.paymentStatus === PaymentStatus.CAPTURED) {
+      const full = await this.prisma.order.findUniqueOrThrow({
+        where: { id: order.id },
+        include: { lines: true },
+      });
+      const res = await this.payments.refund(full);
+      if (res.status === 'REFUNDED') {
+        await this.prisma.order.update({
+          where: { id: order.id },
+          data: { paymentStatus: PaymentStatus.REFUNDED },
+        });
+      }
+    } else if (order.paymentStatus === PaymentStatus.AUTHORIZED) {
+      const res = await this.payments.voidPayment(order, order.paymentReference);
+      if (res.status === 'VOIDED') {
+        await this.prisma.order.update({
+          where: { id: order.id },
+          data: { paymentStatus: PaymentStatus.VOIDED },
+        });
+      }
+    }
   }
 
   private async requireOrder(tenantId: string, id: string): Promise<Order> {

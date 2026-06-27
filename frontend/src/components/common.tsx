@@ -1,7 +1,7 @@
 import type { ReactNode } from 'react';
 import { Badge, Card, Spinner } from './ui/primitives';
-import { orderTone, shipmentTone } from '@/lib/format';
-import type { OrderStatus, ShipmentStatus } from '@/lib/types';
+import { orderTone, paymentTone, shipmentTone } from '@/lib/format';
+import type { OrderStatus, PaymentStatus, ShipmentStatus } from '@/lib/types';
 
 export function OrderStatusBadge({ status }: { status: OrderStatus }) {
   return <Badge className={orderTone(status)}>{status}</Badge>;
@@ -9,6 +9,10 @@ export function OrderStatusBadge({ status }: { status: OrderStatus }) {
 
 export function ShipmentStatusBadge({ status }: { status: ShipmentStatus }) {
   return <Badge className={shipmentTone(status)}>{status.replace(/_/g, ' ')}</Badge>;
+}
+
+export function PaymentStatusBadge({ status }: { status: PaymentStatus }) {
+  return <Badge className={paymentTone(status)}>{status}</Badge>;
 }
 
 export function KpiCard({
