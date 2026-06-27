@@ -10,6 +10,7 @@ import { ApiRole } from '@prisma/client';
 import { Request } from 'express';
 import { PrismaService } from '../common/prisma/prisma.service';
 import { ApiKeyService } from './api-key.service';
+import { TokenService } from './token.service';
 
 declare module 'express-serve-static-core' {
   interface Request {
@@ -18,8 +19,14 @@ declare module 'express-serve-static-core' {
   }
 }
 
-// Paths that authenticate themselves (HMAC/OAuth) or need no tenant.
-const PUBLIC_PREFIXES = ['/health', '/metrics', '/webhooks', '/oauth'];
+// Paths that authenticate themselves (HMAC/OAuth), log in, or need no tenant.
+const PUBLIC_PREFIXES = [
+  '/health',
+  '/metrics',
+  '/webhooks',
+  '/oauth',
+  '/auth/login',
+];
 
 /**
  * Global auth: resolves tenant + role from an API key (`Authorization: Bearer`
@@ -34,6 +41,7 @@ export class AuthGuard implements CanActivate {
   constructor(
     private readonly apiKeys: ApiKeyService,
     private readonly prisma: PrismaService,
+    private readonly tokens: TokenService,
     config: ConfigService,
   ) {
     this.authRequired = config.get<string>('AUTH_REQUIRED', 'false') === 'true';
@@ -47,7 +55,12 @@ export class AuthGuard implements CanActivate {
     }
 
     const raw = this.extractKey(req);
-    if (raw) {
+    if (raw && this.looksLikeJwt(raw)) {
+      // End-user session: a self-hosted JWT carries tenant + role as claims.
+      const claims = this.tokens.verify(raw);
+      req.tenantId = claims.tenantId;
+      req.apiRole = claims.role;
+    } else if (raw) {
       const auth = await this.apiKeys.verify(raw);
       if (!auth) throw new UnauthorizedException('Invalid API key');
       req.tenantId = auth.tenantId;
@@ -78,6 +91,11 @@ export class AuthGuard implements CanActivate {
     if (adminOnly && role !== ApiRole.ADMIN) {
       throw new ForbiddenException('Admin role required');
     }
+  }
+
+  /** A JWT is three base64url segments separated by dots; API keys have none. */
+  private looksLikeJwt(token: string): boolean {
+    return token.split('.').length === 3;
   }
 
   private extractKey(req: Request): string | undefined {

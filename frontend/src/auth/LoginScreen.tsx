@@ -4,14 +4,20 @@ import { useAuth } from './AuthContext';
 import { Button, Card, Input, Label } from '@/components/ui/primitives';
 import { ApiError } from '@/lib/api';
 
+type Mode = 'password' | 'apikey';
+
 /**
- * Sign-in for the console. The server (/auth/me) decides the role from the
- * presented credentials: dev mode (API AUTH_REQUIRED=false) returns ADMIN for a
- * valid tenant; with an API key the key's real role is used.
+ * Sign-in for the console. Two paths:
+ *   • Email & password → a JWT session (POST /auth/login).
+ *   • API key / dev    → tenant + optional key; the server (/auth/me) decides
+ *     the role (dev mode returns ADMIN; a key uses the key's real role).
  */
 export function LoginScreen() {
-  const { signIn } = useAuth();
+  const { signIn, signInWithPassword } = useAuth();
+  const [mode, setMode] = useState<Mode>('password');
   const [tenant, setTenant] = useState('demo');
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
   const [apiKey, setApiKey] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -21,13 +27,34 @@ export function LoginScreen() {
     setError(null);
     setBusy(true);
     try {
-      await signIn(tenant, apiKey || undefined);
+      if (mode === 'password') {
+        await signInWithPassword(tenant, email, password);
+      } else {
+        await signIn(tenant, apiKey || undefined);
+      }
     } catch (err) {
       setError(err instanceof ApiError ? err.message : 'Sign-in failed');
     } finally {
       setBusy(false);
     }
   };
+
+  const tab = (m: Mode, label: string) => (
+    <button
+      type="button"
+      onClick={() => {
+        setMode(m);
+        setError(null);
+      }}
+      className={`flex-1 rounded-md px-3 py-1.5 text-sm font-medium transition ${
+        mode === m
+          ? 'bg-accent/15 text-accent ring-1 ring-inset ring-accent/30'
+          : 'text-muted-foreground hover:text-foreground'
+      }`}
+    >
+      {label}
+    </button>
+  );
 
   return (
     <div className="flex h-full items-center justify-center p-4">
@@ -38,23 +65,56 @@ export function LoginScreen() {
           </span>
           OMS-omni
         </div>
-        <p className="mb-6 text-sm text-muted-foreground">
+        <p className="mb-5 text-sm text-muted-foreground">
           Omnichannel Order &amp; Inventory Console
         </p>
+
+        <div className="mb-5 flex gap-1 rounded-lg bg-muted/40 p-1">
+          {tab('password', 'Email & password')}
+          {tab('apikey', 'API key / dev')}
+        </div>
+
         <form className="space-y-4" onSubmit={submit}>
           <div>
             <Label>Tenant</Label>
             <Input value={tenant} onChange={(e) => setTenant(e.target.value)} placeholder="demo" />
           </div>
-          <div>
-            <Label>API key (optional in dev)</Label>
-            <Input
-              value={apiKey}
-              onChange={(e) => setApiKey(e.target.value)}
-              placeholder="oms_..."
-              type="password"
-            />
-          </div>
+
+          {mode === 'password' ? (
+            <>
+              <div>
+                <Label>Email</Label>
+                <Input
+                  value={email}
+                  onChange={(e) => setEmail(e.target.value)}
+                  placeholder="admin@demo.test"
+                  type="email"
+                  autoComplete="username"
+                />
+              </div>
+              <div>
+                <Label>Password</Label>
+                <Input
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
+                  placeholder="••••••••"
+                  type="password"
+                  autoComplete="current-password"
+                />
+              </div>
+            </>
+          ) : (
+            <div>
+              <Label>API key (optional in dev)</Label>
+              <Input
+                value={apiKey}
+                onChange={(e) => setApiKey(e.target.value)}
+                placeholder="oms_..."
+                type="password"
+              />
+            </div>
+          )}
+
           {error && <div className="text-sm text-red-400">{error}</div>}
           <Button type="submit" className="w-full" disabled={busy}>
             {busy ? 'Signing in…' : 'Sign in'}

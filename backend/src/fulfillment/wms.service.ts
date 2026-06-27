@@ -1,37 +1,52 @@
-import { Injectable, Logger } from '@nestjs/common';
-import { randomUUID } from 'crypto';
+import { Inject, Injectable, Logger } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { Shipment } from '@prisma/client';
+import {
+  WMS_PROVIDERS,
+  WmsDispatchLine,
+  WmsDispatchResult,
+  WmsProvider,
+} from './providers/wms-provider.interface';
 
-export interface WmsDispatchResult {
-  provider: string;
-  jobId: string;
-}
+export { WmsDispatchResult } from './providers/wms-provider.interface';
 
 /**
- * WMS / 3PL handoff adapter. A real implementation would call the warehouse's
- * fulfilment API (ShipBob, Deliverr, a DC's WMS, …) and receive an async
- * shipped/tracking confirmation (delivered here via the existing ship endpoint,
- * which a 3PL webhook would call). This stub returns a synthetic job id.
+ * WMS / 3PL handoff. Resolves the right fulfilment connector for a shipment and
+ * delegates the dispatch. The registry is keyed by provider name; today the
+ * choice is driven by env `WMS_PROVIDER` (default `mock`), and `providerFor()`
+ * is the seam where a per-location mapping (store → in-house WMS, DC → 3PL)
+ * would live.
  */
 @Injectable()
 export class WmsService {
   private readonly log = new Logger(WmsService.name);
+  private readonly byName: Map<string, WmsProvider>;
+  private readonly defaultName: string;
+
+  constructor(
+    @Inject(WMS_PROVIDERS) providers: WmsProvider[],
+    config: ConfigService,
+  ) {
+    this.byName = new Map(providers.map((p) => [p.name, p]));
+    this.defaultName = config
+      .get<string>('WMS_PROVIDER', 'mock')
+      .toLowerCase();
+    this.log.log(
+      `WMS providers: [${[...this.byName.keys()].join(', ')}] (default: ${this.defaultName})`,
+    );
+  }
 
   async dispatch(
     shipment: Shipment,
-    lines: { skuId: string; quantity: number }[],
+    lines: WmsDispatchLine[],
   ): Promise<WmsDispatchResult> {
-    const provider = this.providerFor(shipment.locationId);
-    const jobId = `WMS-${randomUUID().slice(0, 10).toUpperCase()}`;
-    this.log.log(
-      `Dispatched shipment ${shipment.id} to ${provider} (job ${jobId}): ` +
-        lines.map((l) => `${l.skuId.slice(-6)}×${l.quantity}`).join(', '),
-    );
-    return { provider, jobId };
+    return this.providerFor(shipment.locationId).dispatch(shipment, lines);
   }
 
-  // A real registry would map locations → their WMS/3PL connector.
-  private providerFor(_locationId: string): string {
-    return 'STUB-WMS';
+  /** A real registry would map a location to its WMS/3PL connector. */
+  private providerFor(_locationId: string): WmsProvider {
+    return (
+      this.byName.get(this.defaultName) ?? this.byName.get('mock')!
+    );
   }
 }

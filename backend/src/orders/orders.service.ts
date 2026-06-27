@@ -115,7 +115,7 @@ export class OrdersService {
     });
     if (!order) throw new NotFoundException(`Order ${id} not found`);
 
-    const outcome = this.validation.evaluate(order);
+    const outcome = await this.validation.evaluate(order);
     await this.prisma.order.update({
       where: { id },
       data: {
