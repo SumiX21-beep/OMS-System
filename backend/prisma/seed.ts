@@ -6,6 +6,7 @@ import {
   PrismaClient,
   SourcingStrategy,
 } from '@prisma/client';
+import bcrypt from 'bcryptjs';
 
 const prisma = new PrismaClient();
 
@@ -155,7 +156,27 @@ async function main(): Promise<void> {
     });
   }
 
+  // Demo console users (email/password → JWT login). Password: demo1234.
+  const demoUsers: { email: string; name: string; role: ApiRole }[] = [
+    { email: 'admin@demo.test', name: 'Demo Admin', role: ApiRole.ADMIN },
+    { email: 'operator@demo.test', name: 'Demo Operator', role: ApiRole.OPERATOR },
+    { email: 'viewer@demo.test', name: 'Demo Viewer', role: ApiRole.READ_ONLY },
+  ];
+  const passwordHash = await bcrypt.hash('demo1234', 10);
+  for (const u of demoUsers) {
+    await prisma.user.upsert({
+      where: { tenantId_email: { tenantId: tenant.id, email: u.email } },
+      create: { tenantId: tenant.id, ...u, passwordHash },
+      update: {},
+    });
+  }
+
   console.log('Seed complete.');
+  console.log(
+    `  Console users (POST /auth/login, password demo1234):  ${demoUsers
+      .map((u) => `${u.email}(${u.role})`)
+      .join('  ')}`,
+  );
   console.log(
     `  API keys (header  Authorization: Bearer <secret>):  admin=oms_demo_admin_key  operator=oms_demo_operator_key  readonly=oms_demo_readonly_key`,
   );

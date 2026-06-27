@@ -3,6 +3,7 @@ import { Module } from '@nestjs/common';
 import { AdminModule } from './admin/admin.module';
 import { ReconciliationProcessor } from './admin/reconciliation.processor';
 import { CommonModule } from './common/common.module';
+import { EventsModule } from './events/events.module';
 import { QUEUES } from './common/queues/queue.constants';
 import { OrdersModule } from './orders/orders.module';
 import { ReservationProcessor } from './orders/reservation.processor';
@@ -17,6 +18,7 @@ import { SyncProcessor } from './sync/sync.processor';
 @Module({
   imports: [
     CommonModule,
+    EventsModule,
     OrdersModule,
     SyncModule,
     AdminModule,

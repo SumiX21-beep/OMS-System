@@ -1,4 +1,3 @@
-import Anthropic from '@anthropic-ai/sdk';
 import { BadRequestException, Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { PrismaService } from '../common/prisma/prisma.service';
@@ -12,13 +11,39 @@ export interface AskResult {
   steps: number;
 }
 
+// --- Gemini REST types (the slice we use) ---
+interface GeminiPart {
+  text?: string;
+  functionCall?: { name: string; args?: Record<string, unknown> };
+  functionResponse?: { name: string; response: Record<string, unknown> };
+  thoughtSignature?: string;
+}
+interface GeminiContent {
+  role: 'user' | 'model';
+  parts: GeminiPart[];
+}
+interface GeminiCandidate {
+  content?: GeminiContent;
+  finishReason?: string;
+}
+interface GeminiResponse {
+  candidates?: GeminiCandidate[];
+  error?: { message?: string };
+}
+
+interface FunctionDeclaration {
+  name: string;
+  description: string;
+  parameters?: Record<string, unknown>;
+}
+
 // Tools the model may call. Each maps to a tenant-scoped read on real OMS data.
-const TOOLS: Anthropic.Tool[] = [
+const FUNCTION_DECLARATIONS: FunctionDeclaration[] = [
   {
     name: 'get_availability',
     description:
       'Get available-to-promise stock for a SKU: network total plus a per-location breakdown. Call this when asked about stock levels or availability of a product.',
-    input_schema: {
+    parameters: {
       type: 'object',
       properties: {
         skuCode: { type: 'string', description: 'SKU code, e.g. "MUG-WHT"' },
@@ -30,7 +55,7 @@ const TOOLS: Anthropic.Tool[] = [
     name: 'list_low_stock',
     description:
       'List SKU/location combinations at or below an availability threshold. Call this when asked what is low or running out.',
-    input_schema: {
+    parameters: {
       type: 'object',
       properties: {
         threshold: {
@@ -38,20 +63,18 @@ const TOOLS: Anthropic.Tool[] = [
           description: 'available <= this number (default 5)',
         },
       },
-      required: [],
     },
   },
   {
     name: 'order_summary',
     description:
       'Order counts by status and by channel. Call this when asked about the order pipeline.',
-    input_schema: { type: 'object', properties: {}, required: [] },
   },
   {
     name: 'forecast_demand',
     description:
       'Forecast demand, days-of-cover, and a reorder suggestion for a SKU from recent shipment history. Call this when asked about demand, runway, or whether to reorder.',
-    input_schema: {
+    parameters: {
       type: 'object',
       properties: {
         skuCode: { type: 'string', description: 'SKU code, e.g. "MUG-WHT"' },
@@ -71,8 +94,9 @@ If the tools don't return what's needed, say so plainly rather than guessing.`;
 @Injectable()
 export class AiService {
   private readonly log = new Logger(AiService.name);
-  private readonly client: Anthropic | null;
+  private readonly apiKey: string | null;
   private readonly model: string;
+  private readonly baseUrl: string;
 
   constructor(
     config: ConfigService,
@@ -81,63 +105,59 @@ export class AiService {
     private readonly reporting: ReportingService,
     private readonly forecast: DemandForecastService,
   ) {
-    const apiKey = config.get<string>('ANTHROPIC_API_KEY');
-    this.model = config.get<string>('ANTHROPIC_MODEL', 'claude-opus-4-8');
-    this.client = apiKey ? new Anthropic({ apiKey }) : null;
+    this.apiKey = config.get<string>('GEMINI_API_KEY') || null;
+    this.model = config.get<string>('GEMINI_MODEL', 'gemini-2.5-flash');
+    this.baseUrl = config.get<string>(
+      'GEMINI_BASE_URL',
+      'https://generativelanguage.googleapis.com/v1beta',
+    );
   }
 
   get enabled(): boolean {
-    return this.client !== null;
+    return this.apiKey !== null;
   }
 
   /** Run an agentic tool-use loop to answer a natural-language question. */
   async ask(tenantId: string, question: string): Promise<AskResult> {
-    if (!this.client) {
+    if (!this.apiKey) {
       throw new BadRequestException(
-        'AI assistant is not configured — set ANTHROPIC_API_KEY. (The /ai/forecast endpoint works without it.)',
+        'AI assistant is not configured — set GEMINI_API_KEY. (The /ai/forecast endpoint works without it.)',
       );
     }
 
-    const messages: Anthropic.MessageParam[] = [
-      { role: 'user', content: question },
+    const contents: GeminiContent[] = [
+      { role: 'user', parts: [{ text: question }] },
     ];
     const toolsUsed: string[] = [];
     const maxSteps = 6;
 
     for (let step = 1; step <= maxSteps; step++) {
-      const response = await this.client.messages.create({
-        model: this.model,
-        max_tokens: 1024,
-        system: SYSTEM,
-        tools: TOOLS,
-        messages,
-      });
+      const candidate = await this.generate(contents);
+      const parts = candidate.content?.parts ?? [];
+      const calls = parts.filter((p) => p.functionCall);
 
-      if (response.stop_reason === 'tool_use') {
-        messages.push({ role: 'assistant', content: response.content });
-        const results: Anthropic.ToolResultBlockParam[] = [];
-        for (const block of response.content) {
-          if (block.type !== 'tool_use') continue;
-          toolsUsed.push(block.name);
-          const output = await this.runTool(
-            tenantId,
-            block.name,
-            block.input as Record<string, unknown>,
-          );
-          results.push({
-            type: 'tool_result',
-            tool_use_id: block.id,
-            content: JSON.stringify(output),
+      if (calls.length > 0) {
+        // Echo the model's turn back verbatim (preserves thoughtSignature).
+        contents.push({ role: 'model', parts });
+        const responseParts: GeminiPart[] = [];
+        for (const part of calls) {
+          const call = part.functionCall!;
+          toolsUsed.push(call.name);
+          const output = await this.runTool(tenantId, call.name, call.args ?? {});
+          responseParts.push({
+            functionResponse: {
+              name: call.name,
+              response: this.asObject(output),
+            },
           });
         }
-        messages.push({ role: 'user', content: results });
+        contents.push({ role: 'user', parts: responseParts });
         continue;
       }
 
       // Terminal turn — collect the text answer.
-      const answer = response.content
-        .filter((b): b is Anthropic.TextBlock => b.type === 'text')
-        .map((b) => b.text)
+      const answer = parts
+        .map((p) => p.text ?? '')
         .join('\n')
         .trim();
       return { answer, toolsUsed, steps: step };
@@ -148,6 +168,63 @@ export class AiService {
       toolsUsed,
       steps: maxSteps,
     };
+  }
+
+  /** One Gemini generateContent round-trip; returns the first candidate.
+   * Retries transient overload/rate-limit responses with exponential backoff. */
+  private async generate(contents: GeminiContent[]): Promise<GeminiCandidate> {
+    const url = `${this.baseUrl}/models/${this.model}:generateContent`;
+    const payload = JSON.stringify({
+      system_instruction: { parts: [{ text: SYSTEM }] },
+      contents,
+      tools: [{ function_declarations: FUNCTION_DECLARATIONS }],
+      generationConfig: { temperature: 0, maxOutputTokens: 1024 },
+    });
+
+    const maxAttempts = 4;
+    let lastMsg = 'unknown error';
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          'x-goog-api-key': this.apiKey!,
+        },
+        body: payload,
+      });
+      const body = (await res.json()) as GeminiResponse;
+
+      if (res.ok && !body.error) {
+        const candidate = body.candidates?.[0];
+        if (candidate) return candidate;
+        lastMsg = 'Gemini returned no candidates';
+      } else {
+        lastMsg = body.error?.message ?? `HTTP ${res.status}`;
+      }
+
+      // Retry transient overload (503) / rate limit (429); fail fast otherwise.
+      const transient =
+        res.status === 503 ||
+        res.status === 429 ||
+        /high demand|overloaded|temporar|try again/i.test(lastMsg);
+      if (!transient || attempt === maxAttempts) break;
+
+      const backoffMs = 500 * 2 ** (attempt - 1);
+      this.log.warn(
+        `Gemini transient error (attempt ${attempt}/${maxAttempts}): ${lastMsg} — retrying in ${backoffMs}ms`,
+      );
+      await new Promise((r) => setTimeout(r, backoffMs));
+    }
+
+    throw new BadRequestException(`Gemini request failed: ${lastMsg}`);
+  }
+
+  /** functionResponse.response must be a JSON object; wrap scalars/arrays. */
+  private asObject(value: unknown): Record<string, unknown> {
+    if (value && typeof value === 'object' && !Array.isArray(value)) {
+      return value as Record<string, unknown>;
+    }
+    return { result: value };
   }
 
   /** Execute a tool call against tenant-scoped OMS data. */

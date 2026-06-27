@@ -22,7 +22,9 @@ async function request<T>(path: string, opts: RequestOptions = {}): Promise<T> {
   const creds = getCredentials();
   const headers: Record<string, string> = { 'content-type': 'application/json' };
   if (creds?.tenant) headers['x-tenant-id'] = creds.tenant;
-  if (creds?.apiKey) headers['authorization'] = `Bearer ${creds.apiKey}`;
+  // Prefer an end-user JWT; fall back to an API key. Both go as a Bearer token.
+  const bearer = creds?.token ?? creds?.apiKey;
+  if (bearer) headers['authorization'] = `Bearer ${bearer}`;
   if (opts.idempotencyKey) headers['idempotency-key'] = opts.idempotencyKey;
 
   const url = new URL(BASE + path);

@@ -63,7 +63,7 @@ export function AssistantPage() {
 
       {disabled && (
         <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-sm text-amber-300">
-          The LLM assistant is not configured. Set <code>ANTHROPIC_API_KEY</code> on
+          The LLM assistant is not configured. Set <code>GEMINI_API_KEY</code> on
           the API to enable it. (The demand forecast on the Inventory page works
           without it.)
         </div>

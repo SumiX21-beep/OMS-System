@@ -6,12 +6,15 @@ import {
   OrderLine,
   PaymentStatus,
 } from '@prisma/client';
+import { PaymentsService } from '../payments/payments.service';
 
 export interface ValidationOutcome {
   paymentStatus: PaymentStatus;
   fraudStatus: FraudStatus;
   taxTotal: number;
   discountTotal: number;
+  /** Gateway authorization handle, when the charge was authorized. */
+  paymentReference?: string;
   /** Hard-block VALIDATED transition with this reason when set. */
   rejection?: string;
 }
@@ -28,8 +31,8 @@ interface ValidationHook {
  * payment gateway, fraud provider, and tax/promo engines; the pipeline contract
  * (mutate the accumulator, optionally reject) stays the same.
  *
- * Deterministic stub behaviour (for tests/demo):
- *   • payment: AUTHORIZED, unless externalRef contains "DECLINE" → DECLINED (reject)
+ * Payment is delegated to the configured PaymentsService gateway (mock | stripe);
+ * the remaining hooks are deterministic stubs (for tests/demo):
  *   • fraud:   PASS, unless customerRef contains "FRAUD" → FAIL (reject)
  *   • tax:     TAX_RATE × subtotal
  *   • promo:   PROMO_PERCENT × subtotal
@@ -39,22 +42,14 @@ export class OrderValidationService {
   private readonly log = new Logger(OrderValidationService.name);
   private readonly hooks: ValidationHook[];
 
-  constructor(config: ConfigService) {
+  constructor(
+    config: ConfigService,
+    private readonly payments: PaymentsService,
+  ) {
     const taxRate = config.get<number>('TAX_RATE', 0.08);
     const promoPct = config.get<number>('PROMO_PERCENT', 0);
 
     this.hooks = [
-      {
-        name: 'payment',
-        run: (order, acc) => {
-          if ((order.externalRef ?? '').toUpperCase().includes('DECLINE')) {
-            acc.paymentStatus = PaymentStatus.DECLINED;
-            acc.rejection = 'payment declined';
-          } else {
-            acc.paymentStatus = PaymentStatus.AUTHORIZED;
-          }
-        },
-      },
       {
         name: 'fraud',
         run: (order, acc) => {
@@ -81,16 +76,32 @@ export class OrderValidationService {
     ];
   }
 
-  evaluate(order: OrderWithLines): ValidationOutcome {
+  async evaluate(order: OrderWithLines): Promise<ValidationOutcome> {
     const acc: ValidationOutcome = {
       paymentStatus: PaymentStatus.PENDING,
       fraudStatus: FraudStatus.PENDING,
       taxTotal: 0,
       discountTotal: 0,
     };
+    // Fraud/tax/promo first so the gateway charges the final (taxed) amount.
     for (const hook of this.hooks) {
       hook.run(order, acc);
     }
+
+    // Payment: delegate to the configured gateway with the resolved totals.
+    const auth = await this.payments.authorize({
+      ...order,
+      taxTotal: acc.taxTotal,
+      discountTotal: acc.discountTotal,
+    });
+    if (auth.status === 'AUTHORIZED') {
+      acc.paymentStatus = PaymentStatus.AUTHORIZED;
+      acc.paymentReference = auth.reference;
+    } else {
+      acc.paymentStatus = PaymentStatus.DECLINED;
+      acc.rejection = acc.rejection ?? auth.declineReason ?? 'payment declined';
+    }
+
     this.log.debug(
       `Validated order ${order.id}: pay=${acc.paymentStatus} fraud=${acc.fraudStatus} tax=${acc.taxTotal} promo=${acc.discountTotal}`,
     );

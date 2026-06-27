@@ -1,5 +1,30 @@
 import { firstValueFrom, take, toArray } from 'rxjs';
 import { EventsService, DomainEvent } from './events.service';
+import { RedisService } from '../common/redis/redis.service';
+
+/** Minimal RedisService double capturing publishes and exposing the sub handler. */
+function fakeRedis() {
+  const published: string[] = [];
+  let messageHandler: ((ch: string, payload: string) => void) | undefined;
+  const client = {
+    publish: (_ch: string, payload: string) => {
+      published.push(payload);
+      return Promise.resolve(1);
+    },
+    duplicate: () => ({
+      on: (ev: string, h: (ch: string, payload: string) => void) => {
+        if (ev === 'message') messageHandler = h;
+      },
+      subscribe: () => Promise.resolve(),
+      quit: () => Promise.resolve(),
+    }),
+  };
+  return {
+    redis: { client } as unknown as RedisService,
+    published,
+    deliver: (payload: string) => messageHandler?.('oms:events', payload),
+  };
+}
 
 describe('EventsService', () => {
   it('delivers a published event to a same-tenant subscriber', async () => {
@@ -42,5 +67,49 @@ describe('EventsService', () => {
     );
     const msgs = await collected;
     expect(msgs.map((m) => m.data.subjectId)).toEqual(ids);
+  });
+
+  describe('cross-process Redis bridge', () => {
+    it('fans a published event out to Redis with an origin tag', () => {
+      const { redis, published } = fakeRedis();
+      const svc = new EventsService(redis);
+      svc.onModuleInit();
+      svc.publish({ tenantId: 't1', type: 'order.status', subjectId: 'o1' });
+      expect(published).toHaveLength(1);
+      const wire = JSON.parse(published[0]);
+      expect(wire.subjectId).toBe('o1');
+      expect(typeof wire._src).toBe('string');
+    });
+
+    it('delivers an event arriving from another process', async () => {
+      const { redis, deliver } = fakeRedis();
+      const svc = new EventsService(redis);
+      svc.onModuleInit();
+      const got = firstValueFrom(svc.streamFor('t1'));
+      deliver(
+        JSON.stringify({
+          tenantId: 't1',
+          type: 'inventory.atp',
+          subjectId: 'skuFromWorker',
+          _src: 'another-process',
+        }),
+      );
+      const msg = await got;
+      expect(msg.data.subjectId).toBe('skuFromWorker');
+    });
+
+    it('drops its own echo so a same-process event is delivered once', async () => {
+      const { redis, published, deliver } = fakeRedis();
+      const svc = new EventsService(redis);
+      svc.onModuleInit();
+      const seen: string[] = [];
+      const sub = svc.streamFor('t1').subscribe((m) => seen.push(m.data.subjectId));
+      svc.publish({ tenantId: 't1', type: 'order.status', subjectId: 'local' });
+      // Redis echoes the same payload back to the origin process; must be ignored.
+      deliver(published[published.length - 1]);
+      await new Promise((r) => setImmediate(r));
+      expect(seen.filter((s) => s === 'local')).toHaveLength(1);
+      sub.unsubscribe();
+    });
   });
 });

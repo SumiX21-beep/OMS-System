@@ -21,11 +21,24 @@ interface MeResponse {
   role: Role;
 }
 
+interface LoginResponse {
+  accessToken: string;
+  role: Role;
+  user: { id: string; email: string; name: string | null };
+  tenant: { id: string; slug: string; name: string };
+}
+
 interface AuthValue {
   creds: Credentials | null;
   isAuthed: boolean;
-  /** Verify credentials against /auth/me and store the real role. */
+  /** Verify an API key (or dev tenant) against /auth/me and store the real role. */
   signIn: (tenant: string, apiKey?: string) => Promise<void>;
+  /** Email/password login → store the JWT session. */
+  signInWithPassword: (
+    tenant: string,
+    email: string,
+    password: string,
+  ) => Promise<void>;
   logout: () => void;
 }
 
@@ -48,6 +61,26 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       throw err;
     }
   }, []);
+
+  const signInWithPassword = useCallback(
+    async (tenant: string, email: string, password: string) => {
+      // Public endpoint — no creds needed to log in.
+      const res = await api.post<LoginResponse>('/auth/login', {
+        tenant,
+        email,
+        password,
+      });
+      const next: Credentials = {
+        tenant: res.tenant.slug,
+        token: res.accessToken,
+        email: res.user.email,
+        role: res.role,
+      };
+      setCredentials(next);
+      setCreds(next);
+    },
+    [],
+  );
 
   const logout = useCallback(() => {
     clearCredentials();
@@ -74,8 +107,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const value = useMemo<AuthValue>(
-    () => ({ creds, isAuthed: !!creds, signIn, logout }),
-    [creds, signIn, logout],
+    () => ({ creds, isAuthed: !!creds, signIn, signInWithPassword, logout }),
+    [creds, signIn, signInWithPassword, logout],
   );
 
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>;
