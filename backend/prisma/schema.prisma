@@ -37,6 +37,7 @@ model Tenant {
   outboxEvents      OutboxEvent[]
   apiKeys           ApiKey[]
   inbounds          Inbound[]
+  users             User[]
 }
 
 model Sku {
@@ -564,6 +565,27 @@ model ApiKey {
   createdAt  DateTime  @default(now()) @db.Timestamptz(3)
 
   @@index([tenantId, active])
+}
+
+// End-user accounts for the operations console. Authenticate with email/password
+// (bcrypt) and receive a short-lived JWT; the same RBAC roles as API keys apply.
+// API keys remain for machine-to-machine callers.
+model User {
+  id           String    @id @default(cuid())
+  tenantId     String
+  tenant       Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  email        String
+  // bcrypt hash of the password; the plaintext is never stored.
+  passwordHash String
+  name         String?
+  role         ApiRole   @default(OPERATOR)
+  active       Boolean   @default(true)
+  lastLoginAt  DateTime? @db.Timestamptz(3)
+  createdAt    DateTime  @default(now()) @db.Timestamptz(3)
+  updatedAt    DateTime  @updatedAt @db.Timestamptz(3)
+
+  @@unique([tenantId, email])
+  @@index([tenantId])
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
