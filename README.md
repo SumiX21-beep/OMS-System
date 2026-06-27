@@ -45,15 +45,26 @@ Stack: **NestJS + Prisma/Postgres + Redis/BullMQ**, split into three processes
   `PICKED_UP`), depleting stock on collection and completing the order.
 - **Reporting API** — `/reports/orders|inventory|fulfillment|sourcing` aggregates
   for dashboards (status pipeline, low-stock, SLA, split-shipment rate).
-- **AuthN/AuthZ** — API keys (`Authorization: Bearer` / `x-api-key`) with sha256
-  storage and RBAC (`ADMIN`/`OPERATOR`/`READ_ONLY`) via a global guard. Dev
-  fallback (`AUTH_REQUIRED=false`) trusts `x-tenant-id` as ADMIN.
+- **AuthN/AuthZ** — two credential types feeding one RBAC
+  (`ADMIN`/`OPERATOR`/`READ_ONLY`): **API keys** (`Authorization: Bearer` /
+  `x-api-key`, sha256-stored) for machines, and **end-user JWT login**
+  (`POST /auth/login` with email/password → bcrypt verify → HS256 token; users in
+  the `User` table). The global guard accepts either on the same `Bearer` header.
+  Dev fallback (`AUTH_REQUIRED=false`) trusts `x-tenant-id` as ADMIN.
+- **Pluggable providers** — payment gateway (`PaymentProvider`: mock | Stripe
+  drop-in) drives order validation's auth/capture/refund; WMS/3PL connector
+  (`WmsProvider`: mock | ShipBob drop-in) drives shipment dispatch. Both selected
+  by env, both dry-run safely without vendor credentials.
+- **Real-time across processes** — domain events fan out over a Redis pub/sub
+  bridge, so a write in the worker (e.g. reservation TTL expiry) reaches SSE
+  clients connected to the API.
 - **Timestamptz** — all DateTime columns are now `@db.Timestamptz(3)`.
 - **Tests** — `npm test` runs 24 Jest unit tests (HMAC, state machine, retry,
   validation, geo) across 5 suites.
 
-Not yet built: live WMS/3PL hardware connectors, a web dashboard UI, OAuth-based
-end-user auth.
+Not yet built: live vendor SDK calls behind the payment/WMS provider seams (the
+mock + dry-run adapters ship today), and a hosted IdP option (the self-hosted JWT
+path ships today).
 
 ### Shopify integration
 

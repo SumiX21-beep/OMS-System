@@ -2,7 +2,9 @@ import type { Role } from './types';
 
 export interface Credentials {
   tenant: string;
-  apiKey?: string; // optional: dev mode uses x-tenant-id only
+  apiKey?: string; // machine-to-machine: an API key secret
+  token?: string; // end-user session: a JWT from email/password login
+  email?: string; // signed-in user's email (display only)
   role: Role;
 }
 

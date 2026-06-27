@@ -36,11 +36,13 @@ export function useRealtime(): void {
 
   useEffect(() => {
     const creds = getCredentials();
-    if (!creds?.tenant && !creds?.apiKey) return;
+    const bearer = creds?.token ?? creds?.apiKey;
+    if (!creds?.tenant && !bearer) return;
 
     const url = new URL(`${BASE}/events/stream`);
-    if (creds.tenant) url.searchParams.set('tenant', creds.tenant);
-    if (creds.apiKey) url.searchParams.set('apiKey', creds.apiKey);
+    if (creds?.tenant) url.searchParams.set('tenant', creds.tenant);
+    // EventSource can't send headers; the guard also accepts the token here.
+    if (bearer) url.searchParams.set('apiKey', bearer);
 
     const es = new EventSource(url.toString());
     es.onmessage = (ev) => {

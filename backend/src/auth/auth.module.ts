@@ -4,12 +4,22 @@ import { ApiKeyController } from './api-key.controller';
 import { ApiKeyService } from './api-key.service';
 import { AuthController } from './auth.controller';
 import { AuthGuard } from './auth.guard';
+import { TokenService } from './token.service';
+import { UserService } from './user.service';
 
-/** API-key auth + RBAC. The guard is registered globally for all routes. */
+/**
+ * Auth: API keys (machine-to-machine) + end-user JWT login, both feeding the
+ * same RBAC. The guard is registered globally for all routes.
+ */
 @Global()
 @Module({
   controllers: [ApiKeyController, AuthController],
-  providers: [ApiKeyService, { provide: APP_GUARD, useClass: AuthGuard }],
-  exports: [ApiKeyService],
+  providers: [
+    ApiKeyService,
+    UserService,
+    TokenService,
+    { provide: APP_GUARD, useClass: AuthGuard },
+  ],
+  exports: [ApiKeyService, UserService, TokenService],
 })
 export class AuthModule {}
