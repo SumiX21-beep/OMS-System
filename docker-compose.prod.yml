@@ -1,0 +1,133 @@
+# Production stack for OMS-omni — ONE public entrypoint via an nginx reverse
+# proxy. Only the proxy publishes ports (80, and 443 once TLS is added); Postgres,
+# Redis, the API, the worker/scheduler and the frontend all stay on the internal
+# Docker network.
+#
+#   cp deploy/.env.prod.example .env     # then fill in the secrets
+#   docker compose -f docker-compose.prod.yml up -d --build
+#
+# See DEPLOY.md for the Oracle Cloud Free VM walkthrough (ingress, firewall, TLS).
+
+x-backend-env: &backend-env
+  DATABASE_URL: postgresql://postgres:${POSTGRES_PASSWORD}@postgres:5432/oms_omni
+  REDIS_HOST: redis
+  REDIS_PORT: "6379"
+  PORT: "3000"
+  AUTH_REQUIRED: "true"
+  JWT_SECRET: ${JWT_SECRET}
+  JWT_EXPIRES_IN: ${JWT_EXPIRES_IN:-12h}
+  SECRET_ENCRYPTION_KEY: ${SECRET_ENCRYPTION_KEY}
+  PAYMENT_PROVIDER: ${PAYMENT_PROVIDER:-mock}
+  STRIPE_SECRET_KEY: ${STRIPE_SECRET_KEY:-}
+  STRIPE_PAYMENT_METHOD: ${STRIPE_PAYMENT_METHOD:-pm_card_visa}
+  STRIPE_DECLINE_PAYMENT_METHOD: ${STRIPE_DECLINE_PAYMENT_METHOD:-pm_card_chargeDeclined}
+  WMS_PROVIDER: ${WMS_PROVIDER:-mock}
+  SHIPBOB_API_KEY: ${SHIPBOB_API_KEY:-}
+  GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+  SHOPIFY_API_KEY: ${SHOPIFY_API_KEY:-}
+  SHOPIFY_API_SECRET: ${SHOPIFY_API_SECRET:-}
+  SHOPIFY_SCOPES: ${SHOPIFY_SCOPES:-write_inventory,read_inventory,read_products,read_orders}
+  SHOPIFY_API_VERSION: ${SHOPIFY_API_VERSION:-2026-04}
+  # Public base URL the API advertises (Shopify OAuth redirect, webhooks). The
+  # proxy serves the API under /api, so this is your domain + /api.
+  APP_BASE_URL: ${PUBLIC_URL}/api
+
+services:
+  postgres:
+    image: postgres:16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: oms_omni
+    volumes:
+      - oms_pg:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d oms_omni"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # One-shot: apply migrations (and seed the demo tenant/admin) before apps start.
+  # Remove the seed once you have your own data — see DEPLOY.md.
+  migrate:
+    build: ./backend
+    command: sh -c "npx prisma migrate deploy && npx ts-node prisma/seed.ts || true"
+    environment: *backend-env
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  api:
+    build: ./backend
+    restart: unless-stopped
+    command: node dist/main.js
+    environment: *backend-env
+    expose:
+      - "3000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+
+  worker:
+    build: ./backend
+    restart: unless-stopped
+    command: node dist/main.worker.js
+    environment: *backend-env
+    depends_on:
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+
+  scheduler:
+    build: ./backend
+    restart: unless-stopped
+    command: node dist/main.scheduler.js
+    environment: *backend-env
+    depends_on:
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        # Baked in at build time; the SPA calls the API at <domain>/api.
+        VITE_API_URL: ${PUBLIC_URL}/api
+    restart: unless-stopped
+    expose:
+      - "80"
+    depends_on:
+      - api
+
+  proxy:
+    image: nginx:1.27-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      # - "443:443"   # uncomment after adding TLS certs (DEPLOY.md → HTTPS)
+    volumes:
+      - ./deploy/nginx/reverse-proxy.conf:/etc/nginx/conf.d/default.conf:ro
+      # - ./deploy/nginx/certs:/etc/nginx/certs:ro   # mount certs for HTTPS
+    depends_on:
+      - api
+      - frontend
+
+volumes:
+  oms_pg:
