@@ -8,6 +8,8 @@
     "start:api": "node dist/main.js",
     "start:worker": "node dist/main.worker.js",
     "start:scheduler": "node dist/main.scheduler.js",
+    "start:all": "node dist/main.all.js",
+    "start:prod": "prisma migrate deploy && node dist/main.all.js",
     "dev:all": "bash scripts/dev-all.sh",
     "stop": "pkill -f 'node dist/main' || true",
     "ports": "ss -ltnp 2>/dev/null | grep -E ':(3000|5173)' || echo 'nothing on :3000/:5173'",
