@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Post, Query } from '@nestjs/common';
+import { Body, Controller, Get, Param, Post, Query } from '@nestjs/common';
 import { TenantId } from '../common/tenant/tenant.decorator';
 import {
   ChangesQueryDto,
@@ -20,6 +20,11 @@ export class SyncController {
   @Get('channels')
   listChannels(@TenantId() tenantId: string) {
     return this.sync.listChannels(tenantId);
+  }
+
+  @Post('channels/:id/import-shopify')
+  importShopify(@TenantId() tenantId: string, @Param('id') id: string) {
+    return this.sync.importShopify(tenantId, id);
   }
 
   // ── Source-of-truth feeds consumed by StockShield ──

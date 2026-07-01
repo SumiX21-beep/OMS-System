@@ -1,11 +1,24 @@
-import { Injectable, Logger } from '@nestjs/common';
-import { OutboxStatus, Prisma, SalesChannel } from '@prisma/client';
+import {
+  BadRequestException,
+  Injectable,
+  Logger,
+  NotFoundException,
+} from '@nestjs/common';
+import {
+  ChannelType,
+  LocationType,
+  OutboxStatus,
+  Prisma,
+  SalesChannel,
+} from '@prisma/client';
 import { CryptoService } from '../common/crypto/crypto.service';
 import { PrismaService } from '../common/prisma/prisma.service';
 import { makePage, toSkipTake } from '../common/pagination';
 import { AtpService } from '../inventory/atp.service';
+import { InventoryService } from '../inventory/inventory.service';
 import { ConnectorRegistry } from './connector.registry';
 import { InventoryPush } from './connectors/channel-connector';
+import { ShopifyAdminClient, ShopifyCreds } from './connectors/shopify-admin.client';
 import {
   ChangesQueryDto,
   CreateChannelDto,
@@ -26,8 +39,10 @@ export class SyncService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly atp: AtpService,
+    private readonly inventory: InventoryService,
     private readonly connectors: ConnectorRegistry,
     private readonly crypto: CryptoService,
+    private readonly shopify: ShopifyAdminClient,
   ) {}
 
   // ── Channel admin ──────────────────────────────────────────────────────────
@@ -58,6 +73,158 @@ export class SyncService {
 
   listChannels(tenantId: string) {
     return this.prisma.salesChannel.findMany({ where: { tenantId } });
+  }
+
+  /**
+   * Pull Shopify variants with SKU codes into the OMS catalog and mirror their
+   * current available inventory into OMS snapshots.
+   */
+  async importShopify(
+    tenantId: string,
+    channelId: string,
+  ): Promise<{
+    skusImported: number;
+    locationsImported: number;
+    inventoryLevelsImported: number;
+    skippedVariants: number;
+  }> {
+    const channel = await this.prisma.salesChannel.findFirst({
+      where: { id: channelId, tenantId, type: ChannelType.SHOPIFY, active: true },
+    });
+    if (!channel) throw new NotFoundException('Active Shopify channel not found');
+
+    const cfg = (channel.config ?? {}) as {
+      shopDomain?: string;
+      accessToken?: string;
+      apiVersion?: string;
+      inventoryLocationGid?: string;
+    };
+    if (!cfg.shopDomain || !cfg.accessToken) {
+      throw new BadRequestException('Shopify channel is missing OAuth credentials');
+    }
+
+    const creds: ShopifyCreds = {
+      shopDomain: cfg.shopDomain,
+      accessToken: this.crypto.decrypt(cfg.accessToken),
+      apiVersion: cfg.apiVersion ?? '2026-04',
+    };
+    const variants = await this.shopify.listInventoryVariants(creds);
+
+    let skusImported = 0;
+    let inventoryLevelsImported = 0;
+    let skippedVariants = 0;
+    let defaultLocationGid = cfg.inventoryLocationGid;
+    const importedLocationIds = new Set<string>();
+
+    for (const variant of variants) {
+      if (!variant.levels.length) {
+        skippedVariants += 1;
+        continue;
+      }
+
+      const sku = await this.prisma.sku.upsert({
+        where: { tenantId_code: { tenantId, code: variant.sku } },
+        create: {
+          tenantId,
+          code: variant.sku,
+          name:
+            variant.title && variant.title !== 'Default Title'
+              ? `${variant.productTitle} - ${variant.title}`
+              : variant.productTitle,
+        },
+        update: {
+          active: true,
+          name:
+            variant.title && variant.title !== 'Default Title'
+              ? `${variant.productTitle} - ${variant.title}`
+              : variant.productTitle,
+        },
+      });
+      skusImported += 1;
+
+      await this.prisma.channelSkuMapping.upsert({
+        where: { channelId_skuId: { channelId: channel.id, skuId: sku.id } },
+        create: {
+          channelId: channel.id,
+          skuId: sku.id,
+          inventoryItemId: variant.inventoryItemId,
+          variantId: variant.variantId,
+        },
+        update: {
+          inventoryItemId: variant.inventoryItemId,
+          variantId: variant.variantId,
+        },
+      });
+
+      for (const level of variant.levels) {
+        if (!defaultLocationGid) defaultLocationGid = level.locationId;
+        const location = await this.prisma.location.upsert({
+          where: {
+            tenantId_code: {
+              tenantId,
+              code: this.locationCode(level.locationId),
+            },
+          },
+          create: {
+            tenantId,
+            code: this.locationCode(level.locationId),
+            name: level.locationName,
+            type: LocationType.WAREHOUSE,
+          },
+          update: { active: true, name: level.locationName },
+        });
+        importedLocationIds.add(location.id);
+
+        const current = await this.prisma.inventorySnapshot.findUnique({
+          where: {
+            tenantId_skuId_locationId: {
+              tenantId,
+              skuId: sku.id,
+              locationId: location.id,
+            },
+          },
+          select: { onHand: true },
+        });
+        const delta = level.available - (current?.onHand ?? 0);
+        if (delta !== 0) {
+          await this.inventory.adjust({
+            tenantId,
+            skuId: sku.id,
+            locationId: location.id,
+            delta,
+            reason: `Shopify import ${channel.name}`,
+          });
+        }
+        inventoryLevelsImported += 1;
+      }
+    }
+
+    if (defaultLocationGid && defaultLocationGid !== cfg.inventoryLocationGid) {
+      await this.prisma.salesChannel.update({
+        where: { id: channel.id },
+        data: {
+          config: {
+            ...cfg,
+            inventoryLocationGid: defaultLocationGid,
+          } as Prisma.InputJsonValue,
+        },
+      });
+    }
+
+    this.log.log(
+      `Imported Shopify channel ${channel.id}: ${skusImported} SKU(s), ` +
+        `${inventoryLevelsImported} inventory level(s)`,
+    );
+    return {
+      skusImported,
+      locationsImported: importedLocationIds.size,
+      inventoryLevelsImported,
+      skippedVariants,
+    };
+  }
+
+  private locationCode(locationGid: string): string {
+    return `SHOPIFY-${locationGid.split('/').pop() ?? locationGid}`;
   }
 
   /** Paginated outbox monitoring view (newest first). seq is serialised to a string. */

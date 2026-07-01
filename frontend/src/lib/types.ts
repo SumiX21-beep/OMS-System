@@ -139,6 +139,13 @@ export interface Channel {
   externalRef: string | null;
 }
 
+export interface ShopifyImportResult {
+  skusImported: number;
+  locationsImported: number;
+  inventoryLevelsImported: number;
+  skippedVariants: number;
+}
+
 export interface ApiKeyRow {
   id: string;
   name: string;

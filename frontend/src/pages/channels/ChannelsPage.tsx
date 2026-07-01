@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useState } from 'react';
-import { ExternalLink, Plus, RefreshCw } from 'lucide-react';
+import { Download, ExternalLink, Plus, RefreshCw } from 'lucide-react';
 import { ErrorBox, Loading } from '@/components/common';
 import { useAuth } from '@/auth/AuthContext';
 import { RoleGate } from '@/auth/RoleGate';
@@ -10,7 +10,7 @@ import { Table, TCell, THead, TRow } from '@/components/ui/table';
 import { useToast } from '@/components/ui/toast';
 import { api, ApiError } from '@/lib/api';
 import { relativeDate } from '@/lib/format';
-import type { Channel, Page } from '@/lib/types';
+import type { Channel, Page, ShopifyImportResult } from '@/lib/types';
 
 interface OutboxEvent {
   id: string;
@@ -33,6 +33,23 @@ export function ChannelsPage() {
   const channels = useQuery({
     queryKey: ['channels'],
     queryFn: () => api.get<Channel[]>('/channels'),
+  });
+  const qc = useQueryClient();
+  const toast = useToast();
+  const importShopify = useMutation({
+    mutationFn: (channelId: string) =>
+      api.post<ShopifyImportResult>(`/channels/${channelId}/import-shopify`),
+    onSuccess: (r) => {
+      toast(
+        `Imported ${r.skusImported} SKU(s), ${r.inventoryLevelsImported} inventory level(s)`,
+      );
+      qc.invalidateQueries({ queryKey: ['channels'] });
+      qc.invalidateQueries({ queryKey: ['skus'] });
+      qc.invalidateQueries({ queryKey: ['locations'] });
+      qc.invalidateQueries({ queryKey: ['snapshots'] });
+    },
+    onError: (e) =>
+      toast(e instanceof ApiError ? e.message : 'Import failed', 'error'),
   });
 
   const connectShopify = () => {
@@ -80,7 +97,7 @@ export function ChannelsPage() {
           <div className="p-4"><ErrorBox error={channels.error} /></div>
         ) : (
           <Table>
-            <THead cols={['Name', 'Type', 'External ref', 'Active']} />
+            <THead cols={['Name', 'Type', 'External ref', 'Active', 'Actions']} />
             <tbody>
               {channels.data?.map((c) => (
                 <TRow key={c.id}>
@@ -91,6 +108,20 @@ export function ChannelsPage() {
                     <Badge className={c.active ? 'bg-green-500/15 text-green-300' : 'bg-slate-500/15 text-slate-500'}>
                       {c.active ? 'active' : 'inactive'}
                     </Badge>
+                  </TCell>
+                  <TCell>
+                    {c.type === 'SHOPIFY' && c.externalRef ? (
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        disabled={importShopify.isPending}
+                        onClick={() => importShopify.mutate(c.id)}
+                      >
+                        <Download size={14} /> Import
+                      </Button>
+                    ) : (
+                      <span className="text-slate-500">—</span>
+                    )}
                   </TCell>
                 </TRow>
               ))}
