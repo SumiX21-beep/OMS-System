@@ -1,6 +1,7 @@
 import { Injectable, OnModuleDestroy } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import Redis from 'ioredis';
+import { buildRedisOptions } from './redis-connection';
 
 /**
  * Thin wrapper over an ioredis connection used for the ATP availability cache.
@@ -11,11 +12,7 @@ export class RedisService implements OnModuleDestroy {
   readonly client: Redis;
 
   constructor(config: ConfigService) {
-    this.client = new Redis({
-      host: config.get<string>('REDIS_HOST', 'localhost'),
-      port: config.get<number>('REDIS_PORT', 6379),
-      maxRetriesPerRequest: null,
-    });
+    this.client = new Redis(buildRedisOptions(config));
   }
 
   async get(key: string): Promise<string | null> {
